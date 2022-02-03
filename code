@@ -1,0 +1,1449 @@
+# Importing necessary libraries
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import matplotlib
+import missingno as msno
+import pytorch_tabnet
+import torch
+import imblearn
+import seaborn as sb
+import matplotlib.pyplot as plt
+
+from numpy import isnan
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import roc_auc_score, accuracy_score, roc_curve
+from sklearn.model_selection import KFold
+from sklearn.impute import KNNImputer
+from sklearn.model_selection import train_test_split
+from sklearn.naive_bayes import GaussianNB
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
+from pytorch_tabnet.tab_model import TabNetClassifier
+from pytorch_tabnet.pretraining import TabNetPretrainer
+from sklearn.metrics import confusion_matrix
+from imblearn.over_sampling import SMOTE
+
+
+
+sns.set_style("white")
+
+# Creating the data frame
+df = pd.read_csv('tbl2.csv')
+
+df = df.drop(['Unnamed: 0'], axis=1)
+
+
+df.head()
+
+df.info()
+
+df.dtypes
+
+df2 = df
+
+
+df2.isnull().sum()
+
+#!pip install missingno
+
+msno.matrix(df2)
+
+msno.heatmap(df2)
+
+
+
+######
+## TabNet w/o preprocessing¶
+
+feat = df2.drop('compound_outcome', axis = 1)
+
+# Labels are the values we want to predict
+target = np.array(df2['compound_outcome'])
+# Remove the labels from the features
+# axis 1 refers to the columns
+features= df2.drop('compound_outcome', axis = 1)
+# Saving feature names for later use
+feature_list = list(features.columns)
+# Convert to numpy array
+features = np.array(features)
+
+
+
+# print total missing
+print('Missing: %d' % sum(isnan(features).flatten()))
+# define imputer
+imputer = KNNImputer(missing_values=np.nan)
+# fit on the dataset
+imputer.fit(features)
+# transform the dataset
+features_trans = imputer.transform(features)
+# print total missing
+print('Missing: %d' % sum(isnan(features_trans).flatten()))
+
+
+
+# set train/validation and  test sets
+x_train, x_val, y_train, y_val = train_test_split(features_trans, target, test_size=0.30, random_state=8)
+
+x_val, x_test, y_val, y_test = train_test_split(x_val, y_val, test_size=0.50, random_state=8)
+
+
+
+np.random.seed(8)
+
+clf1_nopreproc = TabNetClassifier(optimizer_fn=torch.optim.Adam,
+                       optimizer_params=dict(lr=2e-2),
+                       scheduler_params={"step_size":50, # how to use learning rate scheduler
+                                         "gamma":0.9},
+                       scheduler_fn=torch.optim.lr_scheduler.StepLR,
+                       mask_type='entmax' # "sparsemax"
+                      )
+
+clf1_nopreproc.fit(
+    x_train,y_train,
+    eval_set=[(x_train, y_train), (x_val, y_val)],
+    eval_name=['train', 'valid'],
+    eval_metric=['auc','accuracy'],
+    max_epochs=1000 , patience=50,
+    batch_size=256, virtual_batch_size=128,
+    num_workers=0,
+    weights=1,
+    drop_last=False
+)
+
+# plot losses
+plt.plot(clf1_nopreproc.history['loss'])
+
+# plot auc
+plt.plot(clf1_nopreproc.history['train_accuracy'])
+plt.plot(clf1_nopreproc.history['valid_accuracy'])
+
+# plot learning rates
+plt.plot(clf1_nopreproc.history['lr'])
+
+
+preds = clf1_nopreproc.predict(x_test)
+test_acc = accuracy_score(preds, y_test)
+
+
+preds_valid = clf1_nopreproc.predict(x_val)
+valid_acc = accuracy_score(preds_valid, y_val)
+
+print(f"BEST ACCURACY SCORE ON VALIDATION SET : {valid_acc}")
+print(f"BEST ACCURACY SCORE ON TEST SET : {test_acc}")
+
+
+y_pred = clf1_nopreproc.predict(x_test)
+
+clf1_nopreproc.feature_importances_
+
+feat_importances = pd.Series(clf1_nopreproc.feature_importances_, index=feat.columns)
+ax = feat_importances.nlargest(20).plot(kind='barh')  
+
+ax.figure.savefig('Feature importance unsup.eps', format='eps', dpi=300, bbox_inches='tight')
+ax.figure.savefig('Feature importance unsup.tiff', format='tiff', dpi=300, bbox_inches='tight')
+ax.figure.savefig('Feature importance unsup.svg', format='svg', dpi=1200, bbox_inches='tight')
+
+explain_matrix, masks = clf1_nopreproc.explain(x_test)
+
+
+# Mask plot
+fig, axs = plt.subplots(1, 3, figsize=(20,20))
+
+for i in range(3):
+    axs[i].imshow(masks[i][:50])
+    axs[i].set_title(f"mask {i}")
+    
+fig.savefig('Mask for unsupervised training.eps', format='eps', dpi=300)
+fig.savefig('Mask for unsupervised training.tiff', format='tiff', dpi=300)
+fig.savefig('Mask for unsupervised training.svg', format='svg', dpi=1200)
+
+    
+    
+# Confusion matrix
+
+confusion_matrix(y_test, y_pred)
+
+tabnet_prediction_proba = clf1_nopreproc.predict_proba(x_test)[:, 1]
+
+
+
+
+def roc_curve_and_score(y_test, pred_proba):
+    fpr, tpr, _ = roc_curve(y_test.ravel(), pred_proba.ravel())
+    roc_auc = roc_auc_score(y_test.ravel(), pred_proba.ravel())
+    return fpr, tpr, roc_auc
+
+plt.figure(figsize=(8, 6))
+matplotlib.rcParams.update({'font.size': 14})
+plt.grid()
+fpr, tpr, roc_auc = roc_curve_and_score(y_test, tabnet_prediction_proba)
+plt.plot(fpr, tpr, color='darkorange', lw=2,
+         label='ROC AUC={0:.3f}'.format(roc_auc))
+plt.plot([0, 1], [0, 1], color='navy', lw=1, linestyle='--')
+plt.legend(loc="lower right")
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.05])
+plt.xlabel('1 - Specificity')
+plt.ylabel('Sensitivity')
+plt.show()
+
+    
+    
+### Unsupervised
+
+
+
+# TabNetPretrainer
+unsupervised_model_no_preproc = TabNetPretrainer(
+    optimizer_fn=torch.optim.Adam,
+    optimizer_params=dict(lr=2e-2),
+    mask_type='entmax', # "sparsemax",
+    #n_shared_decoder=1, # nb shared glu for decoding
+    #n_indep_decoder=1, # nb independent glu for decoding
+)
+
+unsupervised_model_no_preproc.fit(
+    x_train,
+    eval_set=[x_val],
+    max_epochs=1000 , patience=50,
+    batch_size=256, virtual_batch_size=128,
+    num_workers=0,
+    drop_last=False,
+    pretraining_ratio=0.8,
+
+)
+
+
+# Make reconstruction from a dataset
+reconstructed_X, embedded_X = unsupervised_model_no_preproc.predict(x_val)
+assert(reconstructed_X.shape==embedded_X.shape)
+
+unsupervised_explain_matrix, unsupervised_masks = unsupervised_model_no_preproc.explain(x_val)
+
+fig, axs = plt.subplots(1, 3, figsize=(20,20))
+
+for i in range(3):
+    axs[i].imshow(unsupervised_masks[i][:50])
+    axs[i].set_title(f"mask {i}")
+    
+    
+unsupervised_model_no_preproc.save_model('./test_pretrain2')
+loaded_pretrain = TabNetPretrainer()
+loaded_pretrain.load_model('./test_pretrain2.zip')
+
+clf2_no_preproc = TabNetClassifier(optimizer_fn=torch.optim.Adam,
+                       optimizer_params=dict(lr=2e-2),
+                       scheduler_params={"step_size":10, # how to use learning rate scheduler
+                                         "gamma":0.9},
+                       scheduler_fn=torch.optim.lr_scheduler.StepLR,
+                       mask_type='sparsemax' # This will be overwritten if using pretrain model
+                      )
+
+clf2_no_preproc.fit(
+    x_train, y_train,
+    eval_set=[(x_train, y_train), (x_val, y_val)],
+    eval_name=['train', 'valid'],
+    eval_metric=['auc', 'accuracy'],
+    max_epochs=1000 , patience=50,
+    batch_size=256, virtual_batch_size=128,
+    num_workers=0,
+    weights=1,
+    drop_last=False,
+    from_unsupervised=loaded_pretrain
+    
+)
+
+
+# plot losses
+plt.plot(clf2_no_preproc.history['loss'])
+
+# plot auc
+plt.plot(clf2_no_preproc.history['train_accuracy'])
+plt.plot(clf2_no_preproc.history['valid_accuracy'])
+
+# plot learning rates
+plt.plot(clf2_no_preproc.history['lr'])
+
+preds = clf2_no_preproc.predict(x_test)
+test_acc = accuracy_score(preds, y_test)
+
+
+preds_valid = clf2_no_preproc.predict(x_val)
+valid_acc = accuracy_score(preds_valid, y_val)
+
+print(f"BEST ACCURACY SCORE ON VALIDATION SET : {valid_acc}")
+print(f"BEST ACCURACY SCORE ON TEST SET : {test_acc}")
+
+clf2_no_preproc.feature_importances_
+
+feat_importances = pd.Series(clf2_no_preproc.feature_importances_, index=feat.columns)
+feat_importances.nlargest(20).plot(kind='barh')
+
+explain_matrix, masks = clf2_no_preproc.explain(x_test)
+
+fig, axs = plt.subplots(1, 3, figsize=(20,20))
+
+for i in range(3):
+    axs[i].imshow(masks[i][:50])
+    axs[i].set_title(f"mask {i}")
+   
+    
+#### TabNet with preprocessing
+    
+df3 = df2.copy()
+
+for col in ["typical_pain_X1"                    ,
+"dispnea_X1"                  ,        "syncope_X1"                         ,
+"prior_dm_X1"                 ,        "prior_ethylic_habit_X1"             ,
+"prior_hyp_X1"                ,        "prior_family_hist_cad_X1"           ,
+"prior_drug_abuse_X1"         ,        "prior_dlp_X1"                       ,
+"prior_ami_X1"                ,        "prior_stroke_X1"                    ,
+"prior_pci_X1"                ,        "prior_pad_X1"                       ,
+"prior_ckd_X1"                ,        "prior_cabg_X1"                      ,
+"prior_smoking_X1"            ,        "prior_hypothiroidism_X1"            ,
+"prior_angina_X1"             ,        "drugs_cocaine_X1"                   ,
+"drugs_crack_X1"              ,        "drugs_marijuana_X1"                 ,
+"ekg1_st_elevation_X1"        ,        "ekg1_neg_t_X1"                      ,
+"ekg1_normal_X1"              ,        "ekg1_bcrd_X1"                       ,
+"ekg1_bcre_X1"                ,        "ekg1_bav_2_3_X1"                    ,
+"ekg1_vt_X1"                  ,        "ekg1_q_v1_v3_X1"                    ,
+"ekg1_q_v1_v4_X1"             ,        "ekg1_q_v1_v5_6_X1"                  ,
+"ekg1_q_dii_iii_avf_X1"       ,        "ekg1_q_v5_v6_X1"                    ,
+"ekg1_q_dii_iii_avf_v5_v8_X1" ,        "ekg1_q_v78_or_st_infra_anterior_X1" ,
+"ekg1_q_di_avl_X1"            ,        "ekg1_q_v4r_X1"                      ,
+"ekg1_q_st_elev_avr_difuse_stinfr_X1", "killip_pre_tnk_X2"                  ,
+"killip_pre_tnk_X3"           ,        "killip_pre_tnk_X4"                  ,
+"killip_highest_X2"           ,        "killip_highest_X3"                  ,
+"killip_highest_X4"           ,        "reperfusion_strategy_X2"            ,
+"reperfusion_strategy_X3"     ,        "gpiibiiia_cate_X1"                  ,
+"nitropruside_cate_X1"        ,        "adenosine_cate_X1"                  ,
+"coronary_dissection_cate_X1" ,        "coronary_rupture_cate_X1"           ,
+"new_ami_cate_X1"             ,        "no_reflow_cate_X1"                  ,
+"culprit_artery_lad_X1"       ,        "culprit_artery_none_X1"             ,
+"timi_pre_X1"                 ,        "timi_pre_X2"                        ,
+"timi_pre_X3"                 ,        "timi_post_X1"                       ,
+"timi_post_X2"                ,        "timi_post_X3"                       ,
+"blush_pre_X1"                ,        "blush_pre_X2"                       ,
+"blush_pre_X3"                ,        "blush_post_X1"                      ,
+"blush_post_X2"               ,        "blush_post_X3"                      ,
+"pci_da_X1"                   ,        "pci_d_X1"                           ,
+"pci_cx_X1"                   ,        "pci_tronco_X1"                      ,
+"pci_mgcx_X1"                 ,        "pci_dg_X1"                          ,
+"pci_undetermined_X1"         ,        "pci_none_X1"                        ,
+"late_cate_X1"                ,        "hipocinesia_inferior_X1"            ,
+"hipocinesia_lateral_X1"      ,        "hipocinesia_septal_X1"              ,
+"hipocinesia_apical_X1"       ,        "hipocinesia_dorsal_X1"              ,
+"hipocinesia_anterior_X1"     ,        "hipocinesia_vd_X1"                  ,
+"hipocinesia_ausente_X1"      ,        "acinesia_inferior_X1"               ,
+"acinesia_lateral_X1"         ,        "acinesia_septal_X1"                 ,
+"acinesia_apical_X1"          ,        "acinesia_dorsal_X1"                 ,
+"acinesia_anterior_X1"        ,        "acinesia_vd_X1"                     ,
+"acinesia_ausente_X1"         ,        "diskinesia_inferior_X1"             ,
+"diskinesia_lateral_X1"       ,        "diskinesia_septal_X1"               ,
+"diskinesia_apical_X1"        ,        "diskinesia_dorsal_X1"               ,
+"diskinesia_anterior_X1"      ,        "diskinesia_vd_X1"                   ,
+"diskinesia_0_ecott_X1"       ,        "diskinesia_ausente_X1"              ,
+"comb_carrest_X1"             ,        ".data_Biarterial_X1"                ,
+".data_Triarterial_X1"        ,        ".data_Tronco_X1"                    ,
+".data_Uniarterial_X1"        ,        "no_cate_lesions_X1"                ,
+"year_adm_2015_X1"            ]:
+    df2[col] = df2[col].astype('category')
+
+
+categ = ["typical_pain_X1"                    ,
+"dispnea_X1"                  ,        "syncope_X1"                         ,
+"prior_dm_X1"                 ,        "prior_ethylic_habit_X1"             ,
+"prior_hyp_X1"                ,        "prior_family_hist_cad_X1"           ,
+"prior_drug_abuse_X1"         ,        "prior_dlp_X1"                       ,
+"prior_ami_X1"                ,        "prior_stroke_X1"                    ,
+"prior_pci_X1"                ,        "prior_pad_X1"                       ,
+"prior_ckd_X1"                ,        "prior_cabg_X1"                      ,
+"prior_smoking_X1"            ,        "prior_hypothiroidism_X1"            ,
+"prior_angina_X1"             ,        "drugs_cocaine_X1"                   ,
+"drugs_crack_X1"              ,        "drugs_marijuana_X1"                 ,
+"ekg1_st_elevation_X1"        ,        "ekg1_neg_t_X1"                      ,
+"ekg1_normal_X1"              ,        "ekg1_bcrd_X1"                       ,
+"ekg1_bcre_X1"                ,        "ekg1_bav_2_3_X1"                    ,
+"ekg1_vt_X1"                  ,        "ekg1_q_v1_v3_X1"                    ,
+"ekg1_q_v1_v4_X1"             ,        "ekg1_q_v1_v5_6_X1"                  ,
+"ekg1_q_dii_iii_avf_X1"       ,        "ekg1_q_v5_v6_X1"                    ,
+"ekg1_q_dii_iii_avf_v5_v8_X1" ,        "ekg1_q_v78_or_st_infra_anterior_X1" ,
+"ekg1_q_di_avl_X1"            ,        "ekg1_q_v4r_X1"                      ,
+"ekg1_q_st_elev_avr_difuse_stinfr_X1", "killip_pre_tnk_X2"                  ,
+"killip_pre_tnk_X3"           ,        "killip_pre_tnk_X4"                  ,
+"killip_highest_X2"           ,        "killip_highest_X3"                  ,
+"killip_highest_X4"           ,        "reperfusion_strategy_X2"            ,
+"reperfusion_strategy_X3"     ,        "gpiibiiia_cate_X1"                  ,
+"nitropruside_cate_X1"        ,        "adenosine_cate_X1"                  ,
+"coronary_dissection_cate_X1" ,        "coronary_rupture_cate_X1"           ,
+"new_ami_cate_X1"             ,        "no_reflow_cate_X1"                  ,
+"culprit_artery_lad_X1"       ,        "culprit_artery_none_X1"             ,
+"timi_pre_X1"                 ,        "timi_pre_X2"                        ,
+"timi_pre_X3"                 ,        "timi_post_X1"                       ,
+"timi_post_X2"                ,        "timi_post_X3"                       ,
+"blush_pre_X1"                ,        "blush_pre_X2"                       ,
+"blush_pre_X3"                ,        "blush_post_X1"                      ,
+"blush_post_X2"               ,        "blush_post_X3"                      ,
+"pci_da_X1"                   ,        "pci_d_X1"                           ,
+"pci_cx_X1"                   ,        "pci_tronco_X1"                      ,
+"pci_mgcx_X1"                 ,        "pci_dg_X1"                          ,
+"pci_undetermined_X1"         ,        "pci_none_X1"                        ,
+"late_cate_X1"                ,        "hipocinesia_inferior_X1"            ,
+"hipocinesia_lateral_X1"      ,        "hipocinesia_septal_X1"              ,
+"hipocinesia_apical_X1"       ,        "hipocinesia_dorsal_X1"              ,
+"hipocinesia_anterior_X1"     ,        "hipocinesia_vd_X1"                  ,
+"hipocinesia_ausente_X1"      ,        "acinesia_inferior_X1"               ,
+"acinesia_lateral_X1"         ,        "acinesia_septal_X1"                 ,
+"acinesia_apical_X1"          ,        "acinesia_dorsal_X1"                 ,
+"acinesia_anterior_X1"        ,        "acinesia_vd_X1"                     ,
+"acinesia_ausente_X1"         ,        "diskinesia_inferior_X1"             ,
+"diskinesia_lateral_X1"       ,        "diskinesia_septal_X1"               ,
+"diskinesia_apical_X1"        ,        "diskinesia_dorsal_X1"               ,
+"diskinesia_anterior_X1"      ,        "diskinesia_vd_X1"                   ,
+"diskinesia_0_ecott_X1"       ,        "diskinesia_ausente_X1"              ,
+"comb_carrest_X1"             ,        ".data_Biarterial_X1"                ,
+".data_Triarterial_X1"        ,        ".data_Tronco_X1"                    ,
+".data_Uniarterial_X1"        ,        "no_cate_lesions_X1"                ,
+"year_adm_2015_X1"         
+       ]
+
+# Encode Categorical Columns
+le = LabelEncoder()
+df3[categ] = df3[categ].apply(le.fit_transform)
+
+
+
+
+numeric = ["ekg_stchanges_after_tnk_pci",         "time_pain_primaryhosp"              ,
+"time_pain_needle"            ,        "time_tnk_tert_hosp"                 ,
+"time_tnk_cate"               ,        "time_cate_duration"                 ,
+"sbp_adm"                     ,        "hr_adm"                             ,
+"bmi"                         ,        "creat_clearance"                    ,
+"number_conventional_stents"  ,        "number_des"                         ,
+"stent_number_pci"            ,        "proacs_cat"                         ,
+"lvef"                        ,        "troponin_peak"                      ,
+"hemoglobin"                  ,        "sodium"                             ,
+"glicemia"                    ,        "hba1c"                              ,
+"tsh"                         ,        "t4_livre"                           ,
+"hdl"                         ,        "ldl"                                ,
+"tg"                          ,        "ast"                                ,
+"alt"                         ,        "ap_perc"                            ,
+"ttpa_s"         
+]
+
+features = df3[numeric]
+
+# Use scaler of choice; here Standard scaler is used
+scaler = StandardScaler().fit(features.values)
+standardized = scaler.transform(features.values)
+inversed = scaler.inverse_transform(standardized)
+
+df3[numeric] = standardized
+
+df3.head(20)
+
+train = df3.copy()
+
+# Labels are the values we want to predict
+target = np.array(train['compound_outcome'])
+# Remove the labels from the features
+# axis 1 refers to the columns
+features= train.drop('compound_outcome', axis = 1)
+# Saving feature names for later use
+feature_list = list(features.columns)
+# Convert to numpy array
+features = np.array(features)
+
+
+# print total missing
+print('Missing: %d' % sum(isnan(features).flatten()))
+# define imputer
+imputer = KNNImputer(missing_values=np.nan)
+# fit on the dataset
+imputer.fit(features)
+# transform the dataset
+features_trans = imputer.transform(features)
+# print total missing
+print('Missing: %d' % sum(isnan(features_trans).flatten()))
+
+x_train, x_val, y_train, y_val = train_test_split(features_trans, target, test_size=0.30, random_state=8)
+
+x_val, x_test, y_val, y_test = train_test_split(x_val, y_val, test_size=0.50, random_state=8)
+
+print("X train shape: ", x_train.shape)
+print("X validation shape: ", x_val.shape)
+print("X test shape: ", x_test.shape)
+print("Y train shape: ", y_train.shape)
+print("Y validation shape: ", y_val.shape)
+print("Y test shape: ", y_test.shape)
+
+
+
+
+np.random.seed(8)
+
+
+
+print("Before OverSampling, counts of label '1': {}".format(sum(y_train==1)))
+print("Before OverSampling, counts of label '0': {} \n".format(sum(y_train==0)))
+
+sm = SMOTE(random_state=8)
+x_train_res, y_train_res = sm.fit_resample(x_train, y_train.ravel())
+
+print('After OverSampling, the shape of train_X: {}'.format(x_train_res.shape))
+print('After OverSampling, the shape of train_y: {} \n'.format(y_train_res.shape))
+
+print("After OverSampling, counts of label '1': {}".format(sum(y_train_res==1)))
+print("After OverSampling, counts of label '0': {}".format(sum(y_train_res==0)))
+
+
+clf1 = TabNetClassifier(optimizer_fn=torch.optim.Adam,
+                       optimizer_params=dict(lr=2e-2),
+                       scheduler_params={"step_size":50, # how to use learning rate scheduler
+                                         "gamma":0.9},
+                       scheduler_fn=torch.optim.lr_scheduler.StepLR,
+                       mask_type='entmax' # "sparsemax"
+                      )
+
+clf1.fit(
+    x_train,y_train,
+    eval_set=[(x_train, y_train), (x_val, y_val)],
+    eval_name=['train', 'valid'],
+    eval_metric=['auc','accuracy'],
+    max_epochs=1000 , patience=50,
+    batch_size=256, virtual_batch_size=128,
+    num_workers=0,
+    weights=1,
+    drop_last=False
+)
+
+# plot losses
+plt.plot(clf1.history['loss'])
+
+# plot auc
+plt.plot(clf1.history['train_auc'])
+plt.plot(clf1.history['valid_auc'])
+
+# plot auc
+plt.plot(clf1.history['train_accuracy'])
+plt.plot(clf1.history['valid_accuracy'])
+
+# plot learning rates
+plt.plot(clf1.history['lr'])
+
+preds = clf1.predict_proba(x_test)
+test_auc = roc_auc_score(y_score=preds[:,1], y_true=y_test)
+
+
+preds_valid = clf1.predict_proba(x_val)
+valid_auc = roc_auc_score(y_score=preds_valid[:,1], y_true=y_val)
+
+print(f"BEST VALID SCORE FOR THIS SET : {clf1.best_cost}")
+print(f"FINAL TEST SCORE FOR THIS SET : {test_auc}")
+
+preds = clf1.predict(x_test)
+test_acc = accuracy_score(preds, y_test)
+
+
+preds_valid = clf1.predict(x_val)
+valid_acc = accuracy_score(preds_valid, y_val)
+
+print(f"BEST ACCURACY SCORE ON VALIDATION SET : {valid_acc}")
+print(f"BEST ACCURACY SCORE ON TEST SET : {test_acc}")
+
+# check that best weights are used
+assert np.isclose(valid_auc, np.max(clf1.history['valid_auc']))
+
+y_pred = clf1.predict(x_test)
+
+clf1.feature_importances_
+
+explain_matrix, masks = clf1.explain(x_test)
+
+fig, axs = plt.subplots(1, 3, figsize=(20,20))
+
+for i in range(3):
+    axs[i].imshow(masks[i][:50])
+    axs[i].set_title(f"mask {i}")
+    
+confusion_matrix(y_test, y_pred)
+
+
+tabnet_prediction_proba = clf1.predict_proba(x_test)[:, 1]
+
+
+def roc_curve_and_score(y_test, pred_proba):
+    fpr, tpr, _ = roc_curve(y_test.ravel(), pred_proba.ravel())
+    roc_auc = roc_auc_score(y_test.ravel(), pred_proba.ravel())
+    return fpr, tpr, roc_auc
+
+plt.figure(figsize=(8, 6))
+matplotlib.rcParams.update({'font.size': 14})
+plt.grid()
+fpr, tpr, roc_auc = roc_curve_and_score(y_test, tabnet_prediction_proba)
+plt.plot(fpr, tpr, color='darkorange', lw=2,
+         label='ROC AUC={0:.3f}'.format(roc_auc))
+plt.plot([0, 1], [0, 1], color='navy', lw=1, linestyle='--')
+plt.legend(loc="lower right")
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.05])
+plt.xlabel('1 - Specificity')
+plt.ylabel('Sensitivity')
+plt.show()
+
+
+
+
+
+#### Unsupervised TabNet
+
+
+# TabNetPretrainer
+unsupervised_model = TabNetPretrainer(
+    optimizer_fn=torch.optim.Adam,
+    optimizer_params=dict(lr=2e-2),
+    mask_type='entmax', # "sparsemax",
+    #n_shared_decoder=1, # nb shared glu for decoding
+    #n_indep_decoder=1, # nb independent glu for decoding
+)
+
+unsupervised_model.fit(
+    x_train,
+    eval_set=[x_val],
+    max_epochs=1000 , patience=50,
+    batch_size=256, virtual_batch_size=128,
+    num_workers=0,
+    drop_last=False,
+    pretraining_ratio=0.8,
+
+)
+
+# Make reconstruction from a dataset
+reconstructed_X, embedded_X = unsupervised_model.predict(x_val)
+assert(reconstructed_X.shape==embedded_X.shape)
+
+unsupervised_explain_matrix, unsupervised_masks = unsupervised_model.explain(x_val)
+
+fig, axs = plt.subplots(1, 3, figsize=(20,20))
+
+for i in range(3):
+    axs[i].imshow(unsupervised_masks[i][:50])
+    axs[i].set_title(f"mask {i}")
+    
+
+unsupervised_model.save_model('./test_pretrain')
+loaded_pretrain = TabNetPretrainer()
+loaded_pretrain.load_model('./test_pretrain.zip')
+
+clf2 = TabNetClassifier(optimizer_fn=torch.optim.Adam,
+                       optimizer_params=dict(lr=2e-2),
+                       scheduler_params={"step_size":10, # how to use learning rate scheduler
+                                         "gamma":0.9},
+                       scheduler_fn=torch.optim.lr_scheduler.StepLR,
+                       mask_type='sparsemax' # This will be overwritten if using pretrain model
+                      )
+
+clf2.fit(
+    x_train, y_train,
+    eval_set=[(x_train, y_train), (x_val, y_val)],
+    eval_name=['train', 'valid'],
+    eval_metric=['auc', 'accuracy'],
+    max_epochs=1000 , patience=50,
+    batch_size=256, virtual_batch_size=128,
+    num_workers=0,
+    weights=1,
+    drop_last=False,
+    from_unsupervised=loaded_pretrain
+    
+)
+
+# plot losses
+plt.plot(clf2.history['loss'])
+
+# plot auc
+plt.plot(clf2.history['train_auc'])
+plt.plot(clf2.history['valid_auc'])
+
+# plot auc
+plt.plot(clf2.history['train_accuracy'])
+plt.plot(clf2.history['valid_accuracy'])
+
+# plot learning rates
+plt.plot(clf2.history['lr'])
+
+preds = clf2.predict_proba(x_test)
+test_auc = roc_auc_score(y_score=preds[:,1], y_true=y_test)
+
+
+preds_valid = clf2.predict_proba(x_val)
+valid_auc = roc_auc_score(y_score=preds_valid[:,1], y_true=y_val)
+
+print(f"BEST VALID SCORE FOR THIS DATASET : {clf2.best_cost}")
+print(f"FINAL TEST SCORE FOR THIS DATASET : {test_auc}")
+
+preds = clf2.predict(x_test)
+test_acc = accuracy_score(preds, y_test)
+
+
+preds_valid = clf2.predict(x_val)
+valid_acc = accuracy_score(preds_valid, y_val)
+
+print(f"BEST ACCURACY SCORE ON VALIDATION SET : {valid_acc}")
+print(f"BEST ACCURACY SCORE ON TEST SET : {test_acc}")
+
+clf2.feature_importances_
+
+explain_matrix, masks = clf2.explain(x_test)
+
+fig, axs = plt.subplots(1, 3, figsize=(20,20))
+
+for i in range(3):
+    axs[i].imshow(masks[i][:50])
+    axs[i].set_title(f"mask {i}")
+    
+confusion_matrix(y_test, y_pred)
+
+
+
+
+
+
+
+
+### XGBoosting
+import xgboost
+from xgboost import XGBClassifier
+
+clf_xgb = XGBClassifier(max_depth=8,
+    learning_rate=0.1,
+    n_estimators=1000,
+    verbosity=0,
+    silent=None,
+    objective='binary:logistic',
+    booster='gbtree',
+    n_jobs=-1,
+    nthread=None,
+    gamma=0,
+    min_child_weight=1,
+    max_delta_step=0,
+    subsample=0.7,
+    colsample_bytree=1,
+    colsample_bylevel=1,
+    colsample_bynode=1,
+    reg_alpha=0,
+    reg_lambda=1,
+    scale_pos_weight=1,
+    base_score=0.5,
+    random_state=0,
+    seed=None,)
+
+clf_xgb.fit(x_train, y_train,
+        eval_set=[(x_val, y_val)],
+        early_stopping_rounds=40,
+        verbose=10)
+
+
+preds = clf_xgb.predict(x_test)
+test_acc = accuracy_score(preds, y_test)
+
+
+preds_valid = clf_xgb.predict(x_val)
+valid_acc = accuracy_score(preds_valid, y_val)
+
+print(f"BEST ACCURACY SCORE ON VALIDATION SET : {valid_acc}")
+print(f"BEST ACCURACY SCORE ON TEST SET : {test_acc}")
+
+
+
+
+
+
+
+### Compare AUCs
+
+np.random.seed(2018)
+
+X = features
+y = target
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=17)
+
+# Naive Bayes Classifier
+nb_clf = GaussianNB()
+nb_clf.fit(X_train, y_train)
+nb_prediction_proba = nb_clf.predict_proba(X_test)[:, 1]
+
+# Ranodm Forest Classifier
+rf_clf = RandomForestClassifier(n_estimators=20)
+rf_clf.fit(X_train, y_train)
+rf_prediction_proba = rf_clf.predict_proba(X_test)[:, 1]
+
+# Multi-layer Perceptron Classifier
+mlp_clf = MLPClassifier(alpha=1, hidden_layer_sizes=150)
+mlp_clf.fit(X_train, y_train)
+mlp_prediction_proba = mlp_clf.predict_proba(X_test)[:, 1]
+
+
+def roc_curve_and_score(y_test, pred_proba):
+    fpr, tpr, _ = roc_curve(y_test.ravel(), pred_proba.ravel())
+    roc_auc = roc_auc_score(y_test.ravel(), pred_proba.ravel())
+    return fpr, tpr, roc_auc
+
+
+plt.figure(figsize=(8, 6))
+matplotlib.rcParams.update({'font.size': 14})
+plt.grid()
+fpr, tpr, roc_auc = roc_curve_and_score(y_test, rf_prediction_proba)
+plt.plot(fpr, tpr, color='darkorange', lw=2,
+         label='ROC AUC={0:.3f}'.format(roc_auc))
+fpr, tpr, roc_auc = roc_curve_and_score(y_test, nb_prediction_proba)
+plt.plot(fpr, tpr, color='green', lw=2,
+         label='ROC AUC={0:.3f}'.format(roc_auc))
+fpr, tpr, roc_auc = roc_curve_and_score(y_test, mlp_prediction_proba)
+plt.plot(fpr, tpr, color='crimson', lw=2,
+         label='ROC AUC={0:.3f}'.format(roc_auc))
+plt.plot([0, 1], [0, 1], color='navy', lw=1, linestyle='--')
+plt.legend(loc="lower right")
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.05])
+plt.xlabel('1 - Specificity')
+plt.ylabel('Sensitivity')
+plt.show()
+
+
+
+
+
+
+def bootstrap_auc(clf, X_train, y_train, X_test, y_test, nsamples=1000):
+    auc_values = []
+    for b in range(nsamples):
+        idx = np.random.randint(X_train.shape[0], size=X_train.shape[0])
+        clf.fit(X_train[idx], y_train[idx])
+        pred = clf.predict_proba(X_test)[:, 1]
+        roc_auc = roc_auc_score(y_test.ravel(), pred.ravel())
+        auc_values.append(roc_auc)
+    return np.percentile(auc_values, (2.5, 97.5))
+
+bootstrap_auc(rf_clf, X_train, y_train, X_test, y_test, nsamples=1000)
+bootstrap_auc(nb_clf, X_train, y_train, X_test, y_test, nsamples=1000)
+bootstrap_auc(mlp_clf, X_train, y_train, X_test, y_test, nsamples=1000)
+
+
+
+def permutation_test(clf, X_train, y_train, X_test, y_test, nsamples=1000):
+    idx1 = np.arange(X_train.shape[0])
+    idx2 = np.arange(X_test.shape[0])
+    auc_values = np.empty(nsamples)
+    for b in range(nsamples):
+        np.random.shuffle(idx1)  # Shuffles in-place
+        np.random.shuffle(idx2)
+        clf.fit(X_train, y_train[idx1])
+        pred = clf.predict_proba(X_test)[:, 1]
+        roc_auc = roc_auc_score(y_test[idx2].ravel(), pred.ravel())
+        auc_values[b] = roc_auc
+    clf.fit(X_train, y_train)
+    pred = clf.predict_proba(X_test)[:, 1]
+    roc_auc = roc_auc_score(y_test.ravel(), pred.ravel())
+    return roc_auc, np.mean(auc_values >= roc_auc)
+
+permutation_test(rf_clf, X_train, y_train, X_test, y_test, nsamples=1000)
+permutation_test(nb_clf, X_train, y_train, X_test, y_test, nsamples=1000)
+permutation_test(mlp_clf, X_train, y_train, X_test, y_test, nsamples=1000)
+
+
+
+def permutation_test_between_clfs(y_test, pred_proba_1, pred_proba_2, nsamples=1000):
+    auc_differences = []
+    auc1 = roc_auc_score(y_test.ravel(), pred_proba_1.ravel())
+    auc2 = roc_auc_score(y_test.ravel(), pred_proba_2.ravel())
+    observed_difference = auc1 - auc2
+    for _ in range(nsamples):
+        mask = np.random.randint(2, size=len(pred_proba_1.ravel()))
+        p1 = np.where(mask, pred_proba_1.ravel(), pred_proba_2.ravel())
+        p2 = np.where(mask, pred_proba_2.ravel(), pred_proba_1.ravel())
+        auc1 = roc_auc_score(y_test.ravel(), p1)
+        auc2 = roc_auc_score(y_test.ravel(), p2)
+        auc_differences(auc1 - auc2)
+    return observed_difference, np.mean(auc_differences >= observed_difference)
+
+permutation_test_between_clfs(y_test, rf_prediction_proba, nb_prediction_proba, nsamples=1000)
+
+
+
+
+
+
+
+
+
+
+
+#### Deephit
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+# For preprocessing
+from sklearn.preprocessing import StandardScaler
+from sklearn_pandas import DataFrameMapper 
+
+import torch # For building the networks 
+import torchtuples as tt # Some useful functions
+
+from pycox.datasets import metabric
+from pycox.models import DeepHitSingle
+from pycox.evaluation import EvalSurv
+
+## Uncomment to install `sklearn-pandas`
+# ! pip install sklearn-pandas
+
+np.random.seed(1234)
+_ = torch.manual_seed(123)
+
+df_train = df2
+df_test = df_train.sample(frac=0.3)
+df_train = df_train.drop(df_test.index)
+df_val = df_train.sample(frac=0.3)
+df_train = df_train.drop(df_val.index)
+
+cols_standardize = ['age'                         ,      'tce_prox_perc'                 ,   
+'da_prox_perc'                ,      'da_perc'                      ,    
+'dg_perc'                     ,      'interm_perc'                  ,    
+'cx_perc'                     ,      'mg_perc'                      ,    
+'cd_perc'                     ,      'dp_perc'                      ,    
+'vps_perc'                    ,      'mie_perc'                     ,    
+'icp_cd_perc'                 ,      'total_stent'         
+]
+#,
+#"demography"                  ,   "comorbidities"                 ,
+#"discharge_meds"              ,   "cononarography"                ,
+#"CAD_severity"                ,   "coronary_procedures"           ,
+#"demography"                  ,   "comorbidities"                 ,
+#"discharge_meds"              ,   "cononarography"                ,
+#"CAD_severity"                ,   "coronary_procedures"           
+#]
+
+cols_leave = ["sex"              ,             
+ "main_diagnosis"              ,   "antecedentes_dmid"            , 
+ "antecedentes_dmnid"          ,   "antecedentes_tabagista"       , 
+ "antecedentes_dlslipidemia"   ,   "antecedentes_has"             , 
+ "antecedentes_historicofamiliar", "antecedentes_obesidade"       , 
+ "antecedentes_fibrilacao_atrial", "antecedentes_dac_med"         , 
+ "antecedentes_dac_icp"          , "antecedentes_dac_crvm"        , 
+ "med_alta_nitrato"              , "med_alta_estatina"            , 
+ "med_alta_bbloq"                , "med_alta_ieca"                , 
+ "med_alta_bra"                  , "med_alta_bloqcanal_calcio"    , 
+ "med_alta_aas"                  , "med_alta_clopidogrel"         , 
+ "med_alta_prasugrel"            , "med_alta_ticagrelor"          , 
+ "med_alta_aco"                  , "med_alta_tiazidico"           , 
+ "med_alta_aldactone"            , "med_alta_furosemida"          , 
+ "med_alta_hipoglicemiante_oral" ,               
+ "da_prox_stent"                 ,
+ "da_stent"                      ,
+ "dg_stent"                      , "interm_stent"                 , 
+ "cx_stent"                      , "mg_stent"                     , 
+ "cd_stent"                      ,
+ "dp_stent"                      ,
+ "uni_daprox"                    , "uni_da"                       , 
+ "uni_cx"                        , "uni_cd"                       , 
+ "bi_da_prox"                    , "bi_sem_daprox"                , 
+ "tri_da_prox"                   , "tri_sem_da_prox"              , 
+ "tce"                           , "tce_com_da_proximal"          , 
+ "tce_uniarterial"               , "tce_bi_daprox"                , 
+ "tce_biarterial"                , "tce_triarterial_da_prox"      , 
+ "tce_triarterial"               , "disfuncao_ve"                 , 
+ "icp_tce"                       , "tce_stent_f"                  , 
+ "icp_da"                        , "da_stent_f"                   , 
+ "icp_dg"                        , "dg_stent_f"                   , 
+ "icp_cx"                        , "cx_stent_f"                   , 
+ "icp_mg"                        , "mg_stent_f"                   , 
+ "icp_cd_perc"                   , "cd_stent_f"                   , 
+ "icp_dp"                        , "dp_stent_f"                   , 
+ "icp_pvs"         
+, "nonfatal_MACE_inhosp"]
+
+standardize = [([col], StandardScaler()) for col in cols_standardize]
+leave = [(col, None) for col in cols_leave]
+
+x_mapper = DataFrameMapper(standardize + leave)
+
+x_train = x_mapper.fit_transform(df_train).astype('float32')
+x_val = x_mapper.transform(df_val).astype('float32')
+x_test = x_mapper.transform(df_test).astype('float32')
+
+
+
+## Label transforms
+
+from pycox.models import LogisticHazard
+
+
+num_durations = 10
+
+labtrans = LogisticHazard.label_transform(num_durations)
+# labtrans = PMF.label_transform(num_durations)
+# labtrans = DeepHitSingle.label_transform(num_durations)
+
+get_target = lambda df: (df['true_time'].values, df['true_label'].values)
+y_train = labtrans.fit_transform(*get_target(df_train))
+y_val = labtrans.transform(*get_target(df_val))
+
+train = (x_train, y_train)
+val = (x_val, y_val)
+
+# We don't need to transform the test labels
+durations_test, events_test = get_target(df_test)
+
+type(labtrans)
+
+labtrans.cuts
+
+y_train
+
+labtrans.cuts[y_train[0]]
+
+
+### Neural Network
+
+in_features = x_train.shape[1]
+num_nodes = [32, 32]
+out_features = labtrans.out_features
+batch_norm = True
+dropout = 0.1
+
+net = tt.practical.MLPVanilla(in_features, num_nodes, out_features, batch_norm, dropout)
+
+
+# net = torch.nn.Sequential(
+#     torch.nn.Linear(in_features, 32),
+#     torch.nn.ReLU(),
+#     torch.nn.BatchNorm1d(32),
+#     torch.nn.Dropout(0.1),
+    
+#     torch.nn.Linear(32, 32),
+#     torch.nn.ReLU(),
+#     torch.nn.BatchNorm1d(32),
+#     torch.nn.Dropout(0.1),
+    
+#     torch.nn.Linear(32, out_features)
+# )
+
+model = LogisticHazard(net, tt.optim.Adam(0.01), duration_index=labtrans.cuts)
+# model = PMF(net, tt.optim.Adam(0.01), duration_index=labtrans.cuts)
+# model = DeepHitSingle(net, tt.optim.Adam(0.01), duration_index=labtrans.cuts)
+
+batch_size = 256
+epochs = 100
+callbacks = [tt.cb.EarlyStopping()]
+
+log = model.fit(x_train, y_train, batch_size, epochs, callbacks, val_data=val)
+
+_ = log.plot()
+
+log.to_pandas().val_loss.min()
+
+model.score_in_batches(val)
+
+surv = model.predict_surv_df(x_test)
+surv.iloc[:, :5].plot(drawstyle='steps-post')
+plt.ylabel('S(t | x)')
+_ = plt.xlabel('Time')
+
+surv = model.interpolate(10).predict_surv_df(x_test)
+surv.iloc[:, :5].plot(drawstyle='steps-post')
+plt.ylabel('S(t | x)')
+_ = plt.xlabel('Time')
+
+
+
+## Evaluation
+
+ev = EvalSurv(surv, durations_test, events_test, censor_surv='km')
+
+ev.concordance_td('antolini')
+
+# Brier Score¶
+time_grid = np.linspace(durations_test.min(), durations_test.max(), 100)
+ev.brier_score(time_grid).plot()
+plt.ylabel('Brier score')
+_ = plt.xlabel('Time')
+
+# Negative binomial log-likelihood¶
+ev.nbll(time_grid).plot()
+plt.ylabel('NBLL')
+_ = plt.xlabel('Time')
+
+ev.integrated_brier_score(time_grid) 
+
+ev.integrated_nbll(time_grid) 
+
+
+
+## Training the model - DeepHit for Single Event
+
+model = DeepHitSingle(net, tt.optim.Adam, alpha=0.2, sigma=0.1, duration_index=labtrans.cuts)
+
+batch_size = 256
+lr_finder = model.lr_finder(x_train, y_train, batch_size, tolerance=3)
+_ = lr_finder.plot()
+
+lr_finder.get_best_lr()
+
+model.optimizer.set_lr(0.002)
+
+epochs = 100
+callbacks = [tt.callbacks.EarlyStopping()]
+log = model.fit(x_train, y_train, batch_size, epochs, callbacks, val_data=val)
+
+_ = log.plot()
+
+# Prediction
+surv = model.predict_surv_df(x_test)
+surv.iloc[:, :10].plot(drawstyle='steps-post')
+plt.ylabel('S(t | x)')
+_ = plt.xlabel('Time')
+
+surv = model.interpolate(10).predict_surv_df(x_test)
+surv.iloc[:, :10].plot(drawstyle='steps-post')
+plt.ylabel('S(t | x)')
+_ = plt.xlabel('Time')
+
+# Evaluation
+ev = EvalSurv(surv, durations_test, events_test, censor_surv='km')
+
+ev.concordance_td('antolini')
+
+# Brier score
+time_grid = np.linspace(durations_test.min(), durations_test.max(), 100)
+ev.brier_score(time_grid).plot()
+plt.ylabel('Brier score')
+_ = plt.xlabel('Time')
+
+# Negative binomial log-likelihood
+ev.nbll(time_grid).plot()
+plt.ylabel('NBLL')
+_ = plt.xlabel('Time')
+
+# Integrate scores
+ev.integrated_brier_score(time_grid) 
+
+ev.integrated_nbll(time_grid) 
+
+
+
+#### DeepHit with Competing Risks
+
+from pycox.preprocessing.label_transforms import LabTransDiscreteTime
+
+url = 'https://raw.githubusercontent.com/chl8856/DeepHit/master/sample%20data/SYNTHETIC/synthetic_comprisk.csv'
+df_train = df2
+df_test = df_train.sample(frac=0.3)
+df_train = df_train.drop(df_test.index)
+df_val = df_train.sample(frac=0.3)
+df_train = df_train.drop(df_val.index)
+
+df_train.head()
+
+#Feature transformations
+get_x = lambda df: (df
+                    .drop(columns=['time', 'label', 'true_time', 'true_label'])
+                    .values.astype('float32'))
+
+x_train = get_x(df_train)
+x_val = get_x(df_val)
+x_test = get_x(df_test)
+
+
+#Label transforms¶
+class LabTransform(LabTransDiscreteTime):
+    def transform(self, durations, events):
+        durations, is_event = super().transform(durations, events > 0)
+        events[is_event == 0] = 0
+        return durations, events.astype('int64')
+    
+
+num_durations = 10
+labtrans = LabTransform(num_durations)
+get_target = lambda df: (df['time'].values, df['label'].values)
+
+y_train = labtrans.fit_transform(*get_target(df_train))
+y_val = labtrans.transform(*get_target(df_val))
+durations_test, events_test = get_target(df_test)
+val = (x_val, y_val)
+
+y_train[0][:6], y_train[1][:6]
+
+labtrans.cuts
+
+
+#Network architecture¶
+
+import torchtuples as tt
+
+from pycox import models
+from pycox.models.utils import pad_col
+
+class DeepHit(tt.Model):
+    """DeepHit for competing risks [1].
+    For single risk (only one event type) use `DeepHitSingle` instead!
+    Note that `alpha` is here defined differently than in [1], as `alpha` is  weighting between
+    the likelihood and rank loss (see Appendix D in [2])
+        loss = alpha * nll + (1 - alpha) rank_loss(sigma).
+    Also, unlike [1], this implementation allows for survival past the max durations, i.e., it
+    does not assume all events happen within the defined duration grid. See [3] for details.
+    
+    Keyword Arguments:
+        alpha {float} -- Weighting (0, 1) likelihood and rank loss (L2 in paper).
+            1 gives only likelihood, and 0 gives only rank loss. (default: {0.2})
+        sigma {float} -- from eta in rank loss (L2 in paper) (default: {0.1})
+    References:
+    [1] Changhee Lee, William R Zame, Jinsung Yoon, and Mihaela van der Schaar. Deephit: A deep learning
+        approach to survival analysis with competing risks. In Thirty-Second AAAI Conference on Artificial
+        Intelligence, 2018.
+        http://medianetlab.ee.ucla.edu/papers/AAAI_2018_DeepHit
+    [2] Håvard Kvamme, Ørnulf Borgan, and Ida Scheel.
+        Time-to-event prediction with neural networks and Cox regression.
+        Journal of Machine Learning Research, 20(129):1–30, 2019.
+        http://jmlr.org/papers/v20/18-424.html
+    
+    [3] Håvard Kvamme and Ørnulf Borgan. Continuous and Discrete-Time Survival Prediction
+        with Neural Networks. arXiv preprint arXiv:1910.06724, 2019.
+        https://arxiv.org/pdf/1910.06724.pdf
+    """
+    def __init__(self, net, optimizer=None, device=None, alpha=0.2, sigma=0.1, duration_index=None, loss=None):
+        self.duration_index = duration_index
+        if loss is None:
+            loss = models.loss.DeepHitLoss(alpha, sigma)
+        super().__init__(net, loss, optimizer, device)
+
+    @property
+    def duration_index(self):
+        """
+        Array of durations that defines the discrete times. This is used to set the index
+        of the DataFrame in `predict_surv_df`.
+        
+        Returns:
+            np.array -- Duration index.
+        """
+        return self._duration_index
+
+    @duration_index.setter
+    def duration_index(self, val):
+        self._duration_index = val
+
+    def make_dataloader(self, data, batch_size, shuffle, num_workers=0):
+        dataloader = super().make_dataloader(data, batch_size, shuffle, num_workers,
+                                             make_dataset=models.data.DeepHitDataset)
+        return dataloader
+    
+    def make_dataloader_predict(self, input, batch_size, shuffle=False, num_workers=0):
+        dataloader = super().make_dataloader(input, batch_size, shuffle, num_workers)
+        return dataloader
+
+    def predict_surv_df(self, input, batch_size=8224, eval_=True, num_workers=0):
+        """Predict the survival function for `input`, i.e., survive all of the event types,
+        and return as a pandas DataFrame.
+        See `prediction_surv_df` to return a DataFrame instead.
+        Arguments:
+            input {tuple, np.ndarra, or torch.tensor} -- Input to net.
+        
+        Keyword Arguments:
+            batch_size {int} -- Batch size (default: {8224})
+            eval_ {bool} -- If 'True', use 'eval' modede on net. (default: {True})
+            num_workers {int} -- Number of workes in created dataloader (default: {0})
+        
+        Returns:
+            pd.DataFrame -- Predictions
+        """
+        surv = self.predict_surv(input, batch_size, True, eval_, True, num_workers)
+        return pd.DataFrame(surv, self.duration_index)
+
+    def predict_surv(self, input, batch_size=8224, numpy=None, eval_=True,
+                     to_cpu=False, num_workers=0):
+        """Predict the survival function for `input`, i.e., survive all of the event types.
+        See `prediction_surv_df` to return a DataFrame instead.
+        Arguments:
+            input {tuple, np.ndarra, or torch.tensor} -- Input to net.
+        
+        Keyword Arguments:
+            batch_size {int} -- Batch size (default: {8224})
+            numpy {bool} -- 'False' gives tensor, 'True' gives numpy, and None give same as input
+                (default: {None})
+            eval_ {bool} -- If 'True', use 'eval' modede on net. (default: {True})
+            to_cpu {bool} -- For larger data sets we need to move the results to cpu
+                (default: {False})
+            num_workers {int} -- Number of workes in created dataloader (default: {0})
+        
+        Returns:
+            [TupleTree, np.ndarray or tensor] -- Predictions
+        """
+        cif = self.predict_cif(input, batch_size, False, eval_, to_cpu, num_workers)
+        surv = 1. - cif.sum(0)
+        return tt.utils.array_or_tensor(surv, numpy, input)
+
+    def predict_cif(self, input, batch_size=8224, numpy=None, eval_=True,
+                     to_cpu=False, num_workers=0):
+        """Predict the cumulative incidence function (cif) for `input`.
+        Arguments:
+            input {tuple, np.ndarray, or torch.tensor} -- Input to net.
+        
+        Keyword Arguments:
+            batch_size {int} -- Batch size (default: {8224})
+            numpy {bool} -- 'False' gives tensor, 'True' gives numpy, and None give same as input
+                (default: {None})
+            eval_ {bool} -- If 'True', use 'eval' mode on net. (default: {True})
+            to_cpu {bool} -- For larger data sets we need to move the results to cpu
+                (default: {False})
+            num_workers {int} -- Number of workers in created dataloader (default: {0})
+        
+        Returns:
+            [np.ndarray or tensor] -- Predictions
+        """
+        pmf = self.predict_pmf(input, batch_size, False, eval_, to_cpu, num_workers)
+        cif = pmf.cumsum(1)
+        return tt.utils.array_or_tensor(cif, numpy, input)
+
+    def predict_pmf(self, input, batch_size=8224, numpy=None, eval_=True,
+                     to_cpu=False, num_workers=0):
+        """Predict the probability mass fuction (PMF) for `input`.
+        Arguments:
+            input {tuple, np.ndarray, or torch.tensor} -- Input to net.
+        
+        Keyword Arguments:
+            batch_size {int} -- Batch size (default: {8224})
+            numpy {bool} -- 'False' gives tensor, 'True' gives numpy, and None give same as input
+                (default: {None})
+            eval_ {bool} -- If 'True', use 'eval' mode on net. (default: {True})
+            grads {bool} -- If gradients should be computed (default: {False})
+            to_cpu {bool} -- For larger data sets we need to move the results to cpu
+                (default: {False})
+            num_workers {int} -- Number of workers in created dataloader (default: {0})
+        
+        Returns:
+            [np.ndarray or tensor] -- Predictions
+        """
+        preds = self.predict(input, batch_size, False, eval_, False, to_cpu, num_workers)
+        pmf = pad_col(preds.view(preds.size(0), -1)).softmax(1)[:, :-1]
+        pmf = pmf.view(preds.shape).transpose(0, 1).transpose(1, 2)
+        return tt.utils.array_or_tensor(pmf, numpy, input)
+
+
+#Define two specific Network architectures
+
+class SimpleMLP(torch.nn.Module):
+    """Simple network structure for competing risks.
+    """
+    def __init__(self, in_features, num_nodes, num_risks, out_features, batch_norm=True,
+                 dropout=None):
+        super().__init__()
+        self.num_risks = num_risks
+        self.mlp = tt.practical.MLPVanilla(
+            in_features, num_nodes, num_risks * out_features,
+            batch_norm, dropout,
+        )
+        
+    def forward(self, input):
+        out = self.mlp(input)
+        return out.view(out.size(0), self.num_risks, -1)
+
+
+class CauseSpecificNet(torch.nn.Module):
+    """Network structure similar to the DeepHit paper, but without the residual
+    connections (for simplicity).
+    """
+    def __init__(self, in_features, num_nodes_shared, num_nodes_indiv, num_risks,
+                 out_features, batch_norm=True, dropout=None):
+        super().__init__()
+        self.shared_net = tt.practical.MLPVanilla(
+            in_features, num_nodes_shared[:-1], num_nodes_shared[-1],
+            batch_norm, dropout,
+        )
+        self.risk_nets = torch.nn.ModuleList()
+        for _ in range(num_risks):
+            net = tt.practical.MLPVanilla(
+                num_nodes_shared[-1], num_nodes_indiv, out_features,
+                batch_norm, dropout,
+            )
+            self.risk_nets.append(net)
+
+    def forward(self, input):
+        out = self.shared_net(input)
+        out = [net(out) for net in self.risk_nets]
+        out = torch.stack(out, dim=1)
+        return out
+
+in_features = x_train.shape[1]
+num_nodes_shared = [64, 64]
+num_nodes_indiv = [32]
+num_risks = y_train[1].max()
+out_features = len(labtrans.cuts)
+batch_norm = True
+dropout = 0.1
+
+net2 = SimpleMLP(in_features, num_nodes_shared, num_risks, out_features)
+net = CauseSpecificNet(in_features, num_nodes_shared, num_nodes_indiv, num_risks,
+                       out_features, batch_norm, dropout)
+
+
+
+## Training
+
+optimizer = tt.optim.AdamWR(lr=0.01, decoupled_weight_decay=0.01,
+                            cycle_eta_multiplier=0.8)
+model = DeepHit(net, optimizer, alpha=0.2, sigma=0.1,
+                duration_index=labtrans.cuts)
+
+epochs = 512
+batch_size = 256
+callbacks = [tt.callbacks.EarlyStoppingCycle()]
+verbose = False # set to True if you want printout
+
+%%time
+log = model.fit(x_train, y_train, batch_size, epochs, callbacks, verbose, val_data=val)
+
+_ = log.plot()
+
+
+
+#Evaluation
+surv = model.predict_surv_df(x_test)
+ev = EvalSurv(surv, durations_test, events_test != 0, censor_surv='km')
+
+ev.concordance_td()
+
+ev.integrated_brier_score(np.linspace(0, durations_test.max(), 100))
+
+
+
+#The cumulative incidence function¶
+cif = model.predict_cif(x_test)
+cif1 = pd.DataFrame(cif[0], model.duration_index)
+cif2 = pd.DataFrame(cif[1], model.duration_index)
+
+ev1 = EvalSurv(1-cif1, durations_test, events_test == 1, censor_surv='km')
+ev2 = EvalSurv(1-cif2, durations_test, events_test == 2, censor_surv='km')
+
+ev1.concordance_td()
+
+ev2.concordance_td()
+
+
+#Plot CIF¶
+
+sample = np.random.choice(len(durations_test), 12)
+fig, axs = plt.subplots(3, 4, True, True, figsize=(20, 10))
+for ax, idx in zip(axs.flat, sample):
+    pd.DataFrame(cif.transpose()[idx], index=labtrans.cuts).plot(ax=ax)
+    ax.set_ylabel('CIF')
+    ax.set_xlabel('Time')
+    ax.grid(linestyle='--')
+    
+fig.savefig('CIF.eps', format='eps', dpi=300, bbox_inches='tight')
+figure.savefig('Feature importance unsup.tiff', format='tiff', dpi=300, bbox_inches='tight')
+ax.figure.savefig('Feature importance unsup.svg', format='svg', dpi=1200, bbox_inches='tight')
